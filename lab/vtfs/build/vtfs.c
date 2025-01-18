@@ -4,25 +4,20 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/printk.h>
-<<<<<<< Updated upstream
-=======
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
->>>>>>> Stashed changes
 
 #define MODULE_NAME "vtfs"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("secs-dev");
-MODULE_DESCRIPTION("A simple FS kernel module");
+MODULE_DESCRIPTION("A simple FS kernel module with RAM storage");
 
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
-<<<<<<< Updated upstream
-=======
 #define VTFS_ROOT_INO 101
 
 struct vtfs_file_content {
@@ -526,15 +521,20 @@ int vtfs_link(struct dentry *old_dentry, struct inode *parent_dir, struct dentry
     return 0;
 }
 
->>>>>>> Stashed changes
 
 static int __init vtfs_init(void) {
-  LOG("VTFS joined the kernel\n");
-  return 0;
+    int ret = register_filesystem(&vtfs_fs_type);
+    if (ret == 0) {
+        LOG("VTFS joined the kernel\n");
+    } else {
+        LOG("Failed to register filesystem\n");
+    }
+    return ret;
 }
 
 static void __exit vtfs_exit(void) {
-  LOG("VTFS left the kernel\n");
+    unregister_filesystem(&vtfs_fs_type);
+    LOG("VTFS left the kernel\n");
 }
 
 module_init(vtfs_init);
