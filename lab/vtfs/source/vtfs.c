@@ -1,21 +1,28 @@
+#include "http.h"
+#include "parse.h"
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+<<<<<<< Updated upstream
+=======
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
-
+>>>>>>> Stashed changes
 
 #define MODULE_NAME "vtfs"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("secs-dev");
-MODULE_DESCRIPTION("A simple FS kernel module with RAM storage");
+MODULE_DESCRIPTION("A simple FS kernel module");
 
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
+<<<<<<< Updated upstream
+=======
 #define VTFS_ROOT_INO 101
 
 struct vtfs_file_content {
@@ -36,7 +43,7 @@ struct vtfs_file_info {
 
 // Глобальный список файлов
 static LIST_HEAD(vtfs_files);
-static int next_ino = 103; // Начинаем с 103, так как 101 и 102 уже используются
+// static int next_ino = 103;
 static DEFINE_MUTEX(vtfs_files_lock);
 
 // Прототипы функций
@@ -54,6 +61,13 @@ int vtfs_mkdir(struct mnt_idmap *idmap, struct inode *parent_inode, struct dentr
 int vtfs_rmdir(struct inode *parent_inode, struct dentry *child_dentry);
 int vtfs_link(struct dentry *old_dentry, struct inode *parent_dir, struct dentry *new_dentry);
 
+// http
+#define BUFFER_SIZE 4096
+static char response_buffer[BUFFER_SIZE];
+static char encoded_name[512];
+static char encoded_content[4096];
+static const char* AUTH_TOKEN = "AUTH_TOKEN";
+
 
 struct vtfs_file_info *find_file_info(ino_t ino);
 struct vtfs_file_info *find_file_in_dir(const char *name, ino_t parent_ino);
@@ -65,7 +79,7 @@ struct inode_operations vtfs_inode_ops = {
     .unlink = vtfs_unlink,
     .mkdir = vtfs_mkdir,
     .rmdir = vtfs_rmdir,
-    .link = vtfs_link,
+    .link = vtfs_link, // Добавили поддержку жестких ссылок
 };
 
 struct file_operations vtfs_dir_ops = {
@@ -88,116 +102,68 @@ struct file_system_type vtfs_fs_type = {
 
 ssize_t vtfs_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset) {
     struct inode *inode = filp->f_inode;
-    struct vtfs_file_info *file_info = find_file_info(inode->i_ino);
-    ssize_t ret = -ENOENT;
-
-    if (!file_info) {
-        return ret;
-    }
-
-    mutex_lock(&file_info->lock);
+    char file_id[32];
+    int64_t result;
     
-    // Проверяем, не вышли ли мы за пределы файла
-    if (*offset >= file_info->content.size) {
-        mutex_unlock(&file_info->lock);
-        return 0; // EOF
+    // Конвертируем inode файла в строку
+    snprintf(file_id, sizeof(file_id), "%lu", inode->i_ino);
+    
+    // Получаем содержимое файла с сервера
+    result = vtfs_http_call(AUTH_TOKEN, "download", response_buffer, BUFFER_SIZE, 1,
+                           "id", file_id);
+                           
+    if (result < 0) {
+        return result;
     }
-
-    // Вычисляем, сколько байт мы можем прочитать
-    length = min(length, (size_t)(file_info->content.size - *offset));
     
     // Копируем данные в буфер пользователя
-    if (copy_to_user(buffer, file_info->content.data + *offset, length)) {
-        mutex_unlock(&file_info->lock);
+    if (copy_to_user(buffer, response_buffer, result))
         return -EFAULT;
-    }
-
-    *offset += length;
-    ret = length;
     
-    mutex_unlock(&file_info->lock);
-    return ret;
+    *offset += result;
+    return result;
 }
 
 ssize_t vtfs_write(struct file *filp, const char __user *buffer, size_t length, loff_t *offset) {
     struct inode *inode = filp->f_inode;
-    struct vtfs_file_info *file_info = find_file_info(inode->i_ino);
-    ssize_t ret = -ENOENT;
-
-    if (!file_info) {
-        return ret;
-    }
-
-    mutex_lock(&file_info->lock);
-
-    // Если пишем в начало файла (*offset == 0), очищаем существующее содержимое
-    if (*offset == 0) {
-        file_info->content.size = 0;
-        if (file_info->content.data) {
-            memset(file_info->content.data, 0, file_info->content.allocated);
-        }
-    }
+    char file_id[32];
+    char *temp_buffer;
+    int64_t result;
     
-    // Проверяем, нужно ли увеличить буфер
-    if (*offset + length > file_info->content.allocated) {
-        size_t new_size = max(*offset + length, file_info->content.allocated * 2);
-        if (new_size == 0) new_size = PAGE_SIZE;
+    if (length > BUFFER_SIZE)  // Убедимся, что размер данных не превышает размер буфера
+        return -ENOSPC;
         
-        char *new_data = krealloc(file_info->content.data, new_size, GFP_KERNEL);
-        if (!new_data) {
-            mutex_unlock(&file_info->lock);
-            return -ENOMEM;
-        }
-        
-        // Очищаем новую память
-        if (new_size > file_info->content.allocated) {
-            memset(new_data + file_info->content.allocated, 0, 
-                   new_size - file_info->content.allocated);
-        }
-        
-        file_info->content.data = new_data;
-        file_info->content.allocated = new_size;
-    }
+    temp_buffer = kmalloc(length, GFP_KERNEL);  // Используем динамическую память для данных
+    if (!temp_buffer)
+        return -ENOMEM;  // Ошибка выделения памяти
 
-    // Проверяем корректность ASCII символов
-    char *tmp_buffer = kmalloc(length, GFP_KERNEL);
-    if (!tmp_buffer) {
-        mutex_unlock(&file_info->lock);
-        return -ENOMEM;
-    }
-
-    if (copy_from_user(tmp_buffer, buffer, length)) {
-        kfree(tmp_buffer);
-        mutex_unlock(&file_info->lock);
+    if (copy_from_user(temp_buffer, buffer, length)) {
+        kfree(temp_buffer);  // Освобождаем память в случае ошибки
         return -EFAULT;
     }
+    
+    // URL encode содержимого
+    encode(temp_buffer, encoded_content);
 
-    // Проверяем, что все символы ASCII (0-127)
-    for (size_t i = 0; i < length; i++) {
-        if ((unsigned char)tmp_buffer[i] > 127) {
-            kfree(tmp_buffer);
-            mutex_unlock(&file_info->lock);
-            return -EINVAL;
-        }
+    // Конвертируем inode файла в строку
+    snprintf(file_id, sizeof(file_id), "%lu", inode->i_ino);
+    
+    // Отправляем содержимое на сервер
+    result = vtfs_http_call(AUTH_TOKEN, "upload", response_buffer, BUFFER_SIZE, 2,
+                           "id", file_id,
+                           "content", encoded_content);
+                           
+    kfree(temp_buffer);  // Освобождаем память после использования
+    
+    if (result < 0) {
+        return result;
     }
-
-    // Копируем проверенные данные
-    memcpy(file_info->content.data + *offset, tmp_buffer, length);
-    kfree(tmp_buffer);
-
-    if (*offset + length > file_info->content.size) {
-        file_info->content.size = *offset + length;
-    }
-
+    
     *offset += length;
-    ret = length;
-    
-    // Обновляем время модификации файла
-    inode->__i_mtime = current_time(inode);
-    
-    mutex_unlock(&file_info->lock);
-    return ret;
+    return length;
 }
+
+
 
 struct dentry* vtfs_mount(struct file_system_type* fs_type, int flags, const char* token, void* data) {
     struct dentry* ret = mount_nodev(fs_type, flags, data, vtfs_fill_super);
@@ -271,46 +237,87 @@ struct vtfs_file_info *find_file_in_dir(const char *name, ino_t parent_ino) {
 int vtfs_iterate(struct file *filp, struct dir_context *ctx) {
     struct dentry *dentry = filp->f_path.dentry;
     struct inode *inode = dentry->d_inode;
-    ino_t current_ino = inode->i_ino;
-    int pos = ctx->pos;
+    char dir_id[32];
+    int64_t result;
     
-    if (pos < 0)
-        return 0;
-
-    if (pos == 0) {
-        if (!dir_emit(ctx, ".", 1, current_ino, DT_DIR))
+    // Обработка . и ..
+    if (ctx->pos == 0) {
+        if (!dir_emit(ctx, ".", 1, inode->i_ino, DT_DIR))
             return 0;
         ctx->pos++;
         return 1;
     }
-
-    if (pos == 1) {
-        struct vtfs_file_info *current_dir = find_file_info(current_ino);
-        ino_t parent_ino = current_dir ? current_dir->parent_ino : VTFS_ROOT_INO;
+    if (ctx->pos == 1) {
+        ino_t parent_ino = dentry->d_parent->d_inode->i_ino;
         if (!dir_emit(ctx, "..", 2, parent_ino, DT_DIR))
             return 0;
         ctx->pos++;
         return 1;
     }
 
-    struct vtfs_file_info *file_info;
-    int count = 2;
-    
-    list_for_each_entry(file_info, &vtfs_files, list) {
-        if (file_info->parent_ino == current_ino) {
-            if (count == pos) {
-                unsigned char type = file_info->is_dir ? DT_DIR : DT_REG;
-                if (!dir_emit(ctx, file_info->name, strlen(file_info->name),
-                            file_info->ino, type))
-                    return 0;
-                ctx->pos++;
-                return 1;
-            }
-            count++;
+    // Если мы уже прочитали все файлы
+    if (ctx->pos == 2) {
+        // Запрашиваем список файлов с сервера
+        snprintf(dir_id, sizeof(dir_id), "%lu", inode->i_ino);
+        result = vtfs_http_call(AUTH_TOKEN, "list", response_buffer, BUFFER_SIZE, 1,
+                               "parentId", dir_id);
+                               
+        if (result < 0) {
+            return result;
         }
+        
+        // Убеждаемся что ответ заканчивается нулем
+        response_buffer[BUFFER_SIZE - 1] = '\0';
     }
     
-    return 0;
+    // Парсим JSON ответ
+    char* p = response_buffer;
+    
+    // Пропускаем все файлы до текущей позиции
+    int current_pos = 2;  // Начинаем с 2, так как 0 и 1 - это . и ..
+    
+    // Ищем начало массива
+    p = skip_whitespace(p);
+    if (*p != '[')
+        return 0;
+    p++;
+    
+    while (current_pos < ctx->pos) {
+        struct file_entry entry;
+        p = skip_whitespace(p);
+        
+        if (*p == ']')  // Конец массива
+            return 0;
+            
+        p = parse_file_entry(p, &entry);
+        if (!p)
+            return -EIO;  // Ошибка парсинга
+            
+        p = skip_whitespace(p);
+        if (*p == ',')
+            p++;
+            
+        current_pos++;
+    }
+    
+    // Парсим следующий файл
+    struct file_entry entry;
+    p = skip_whitespace(p);
+    
+    if (*p == ']')  // Конец массива
+        return 0;
+        
+    p = parse_file_entry(p, &entry);
+    if (!p)
+        return -EIO;
+        
+    // Эмитим файл
+    unsigned char type = entry.is_dir ? DT_DIR : DT_REG;
+    if (!dir_emit(ctx, entry.name, strlen(entry.name), entry.ino, type))
+        return 0;
+        
+    ctx->pos++;
+    return 1;
 }
 
 
@@ -348,29 +355,33 @@ void vtfs_kill_sb(struct super_block* sb) {
 
 int vtfs_create(struct mnt_idmap *idmap, struct inode *parent_inode, 
                 struct dentry *child_dentry, umode_t mode, bool b) {
-    struct vtfs_file_info *new_file_info = kmalloc(sizeof(*new_file_info), GFP_KERNEL);
-    if (!new_file_info) {
-        return -ENOMEM;
+    const char *name = child_dentry->d_name.name;
+    char parent_id[32];
+    int64_t result;
+
+    // URL encode имени файла
+    encode(name, encoded_name);
+    
+    // Конвертируем parent inode в строку
+    snprintf(parent_id, sizeof(parent_id), "%lu", parent_inode->i_ino);
+    
+    // Вызываем API для создания файла
+    result = vtfs_http_call(AUTH_TOKEN, "create", response_buffer, BUFFER_SIZE, 4,
+                           "name", encoded_name,
+                           "parentId", parent_id,
+                           "isDir", "false",
+                           "content", "");
+                           
+    if (result < 0) {
+        return result;
     }
 
-    new_file_info->ino = next_ino++;
-    new_file_info->content.data = NULL;
-    new_file_info->content.size = 0;
-    new_file_info->content.allocated = 0;
-    new_file_info->is_dir = false;
-    new_file_info->parent_ino = parent_inode->i_ino;
-    mutex_init(&new_file_info->lock);
-    
-    snprintf(new_file_info->name, sizeof(new_file_info->name), "%s", child_dentry->d_name.name);
-    
-    list_add(&new_file_info->list, &vtfs_files);
-    
+    // Создаем новый inode
     struct inode *inode = vtfs_get_inode(parent_inode->i_sb, NULL, 
                                        S_IFREG | S_IRWXU | S_IRWXG | S_IRWXO,
-                                       new_file_info->ino);
+                                       result); // Используем ID из ответа сервера
+    
     if (!inode) {
-        list_del(&new_file_info->list);
-        kfree(new_file_info);
         return -ENOMEM;
     }
 
@@ -402,47 +413,39 @@ int vtfs_unlink(struct inode *parent_inode, struct dentry *child_dentry) {
 
 int vtfs_mkdir(struct mnt_idmap *idmap, struct inode *parent_inode,
                struct dentry *child_dentry, umode_t mode) {
-    struct inode *inode;
-    ino_t parent_ino = parent_inode->i_ino;
     const char *name = child_dentry->d_name.name;
+    char parent_id[32];
+    int64_t result;
     
-    // Проверяем, не существует ли уже директория с таким именем
-    if (find_file_in_dir(name, parent_ino))
-        return -EEXIST;
+    // URL encode имени директории
+    encode(name, encoded_name);
     
-    mutex_lock(&vtfs_files_lock);
+    // Конвертируем parent inode в строку
+    snprintf(parent_id, sizeof(parent_id), "%lu", parent_inode->i_ino);
     
-    inode = vtfs_get_inode(parent_inode->i_sb, NULL,
-                          S_IFDIR | mode, next_ino++);
+    // Вызываем API для создания директории
+    result = vtfs_http_call(AUTH_TOKEN, "create", response_buffer, BUFFER_SIZE, 3,
+                           "name", encoded_name,
+                           "parentId", parent_id,
+                           "isDir", "true");
+                           
+    if (result < 0) {
+        return result;
+    }
+
+    // Создаем новый inode
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb, NULL,
+                                       S_IFDIR | mode,
+                                       result); // Используем ID из ответа сервера
     
     if (!inode) {
-        mutex_unlock(&vtfs_files_lock);
         return -ENOMEM;
     }
-    
-    struct vtfs_file_info *dir_info = kmalloc(sizeof(*dir_info), GFP_KERNEL);
-    if (!dir_info) {
-        iput(inode);
-        mutex_unlock(&vtfs_files_lock);
-        return -ENOMEM;
-    }
-    
-    // Инициализация информации о директории
-    memset(dir_info, 0, sizeof(*dir_info));
-    strncpy(dir_info->name, name, 255);
-    dir_info->name[255] = '\0';
-    dir_info->ino = inode->i_ino;
-    dir_info->parent_ino = parent_ino;
-    dir_info->is_dir = true;
-    mutex_init(&dir_info->lock);
-    
-    list_add(&dir_info->list, &vtfs_files);
     
     inode->i_op = &vtfs_inode_ops;
     inode->i_fop = &vtfs_dir_ops;
     d_add(child_dentry, inode);
     
-    mutex_unlock(&vtfs_files_lock);
     return 0;
 }
 
@@ -473,6 +476,7 @@ int vtfs_link(struct dentry *old_dentry, struct inode *parent_dir, struct dentry
     struct vtfs_file_info *old_file_info;
     struct vtfs_file_info *new_file_info;
 
+    // Проверяем, является ли старый объект регулярным файлом
     if (!S_ISREG(old_inode->i_mode))
         return -EPERM;
 
@@ -522,20 +526,15 @@ int vtfs_link(struct dentry *old_dentry, struct inode *parent_dir, struct dentry
     return 0;
 }
 
+>>>>>>> Stashed changes
 
 static int __init vtfs_init(void) {
-    int ret = register_filesystem(&vtfs_fs_type);
-    if (ret == 0) {
-        LOG("VTFS joined the kernel\n");
-    } else {
-        LOG("Failed to register filesystem\n");
-    }
-    return ret;
+  LOG("VTFS joined the kernel\n");
+  return 0;
 }
 
 static void __exit vtfs_exit(void) {
-    unregister_filesystem(&vtfs_fs_type);
-    LOG("VTFS left the kernel\n");
+  LOG("VTFS left the kernel\n");
 }
 
 module_init(vtfs_init);
